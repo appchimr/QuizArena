@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>QuizArena</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;600;800&display=swap" />
+<style>
+  * { box-sizing: border-box; }
+  html, body, #root { margin: 0; padding: 0; min-height: 100%; background: #14132B; }
+  body { font-family: 'Inter', sans-serif; }
+  input, textarea, button { font-family: inherit; }
+</style>
+
+<!-- React + Babel (transforme le JSX directement dans le navigateur, pas de build nécessaire) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Firebase (synchronisation temps réel entre l'hôte et les joueurs) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+
+<!-- Génération du QR code -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// =========================================================
+// CONFIGURATION FIREBASE — À REMPLIR avec les valeurs de ton
+// projet (Console Firebase > Paramètres du projet > Général
+// > "Vos applications" > config SDK).
+// =========================================================
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBKC2TvEarEgVP9BRhAMwmho-NMQtzIR6I",
+  authDomain: "quizarena-bfea1.firebaseapp.com",
+  databaseURL: "https://quizarena-bfea1-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "quizarena-bfea1",
+};
+
+let dbReady = false;
+try {
+  firebase.initializeApp(FIREBASE_CONFIG);
+  dbReady = true;
+} catch (e) {
+  console.error("Échec d'initialisation Firebase — vérifie FIREBASE_CONFIG.", e);
+}
+const db = dbReady ? firebase.database() : null;
+
+function dbGet(path) {
+  if (!db) return Promise.resolve(null);
+  return db.ref(path).once("value").then((snap) => snap.val());
+}
+function dbSet(path, value) {
+  if (!db) return Promise.resolve();
+  return db.ref(path).set(value === undefined ? null : value);
+}
+// Écoute en direct : appelle cb(valeur) à chaque changement, renvoie une fonction de désabonnement.
+function dbListen(path, cb) {
+  if (!db) return () => {};
+  const ref = db.ref(path);
+  const handler = (snap) => cb(snap.val());
+  ref.on("value", handler);
+  return () => ref.off("value", handler);
+}
+
+// ---------- Bibliothèque de quiz : stockage LOCAL (propre à chaque navigateur) ----------
+const LIBRARY_KEY = "quizarena_library";
+function loadLibrary() {
+  try {
+    return JSON.parse(localStorage.getItem(LIBRARY_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+function saveToLibrary(quiz) {
+  const lib = loadLibrary();
+  const idx = lib.findIndex((q) => q.id === quiz.id);
+  const entry = { ...quiz, updatedAt: Date.now() };
+  if (idx >= 0) lib[idx] = entry;
+  else lib.unshift(entry);
+  localStorage.setItem(LIBRARY_KEY, JSON.stringify(lib));
+  return lib;
+}
+function deleteFromLibrary(id) {
+  const next = loadLibrary().filter((q) => q.id !== id);
+  localStorage.setItem(LIBRARY_KEY, JSON.stringify(next));
+  return next;
+}
+
+// ---------- Icônes minimalistes (pas de dépendance npm) ----------
+function Icn({ children, size = 18, style }) {
+  return (
+    <span style={{ fontSize: size, display: "inline-flex", alignItems: "center", justifyContent: "center", lineHeight: 1, ...style }}>
+      {children}
+    </span>
+  );
+}
+const IcoPlus = (p) => <Icn {...p}>➕</Icn>;
+const IcoTrash = (p) => <Icn {...p}>🗑️</Icn>;
+const IcoPlay = (p) => <Icn {...p}>▶️</Icn>;
+const IcoUsers = (p) => <Icn {...p}>👥</Icn>;
+const IcoClock = (p) => <Icn {...p}>🕐</Icn>;
+const IcoTrophy = (p) => <Icn {...p}>🏆</Icn>;
+const IcoArrowRight = (p) => <Icn {...p}>➜</Icn>;
+const IcoCheck = (p) => <Icn {...p} style={{ color: p.color, ...(p.style||{}) }}>✔️</Icn>;
+const IcoX = (p) => <Icn {...p} style={{ color: p.color, ...(p.style||{}) }}>✖️</Icn>;
+const IcoEdit = (p) => <Icn {...p}>✎</Icn>;
+const IcoCopy = (p) => <Icn {...p} style={{ color: p.color, ...(p.style||{}) }}>⧉</Icn>;
+const IcoZap = (p) => <Icn {...p}>⚡</Icn>;
+const IcoBook = (p) => <Icn {...p}>📖</Icn>;
+const IcoSave = (p) => <Icn {...p}>💾</Icn>;
+const IcoFolder = (p) => <Icn {...p} style={{ color: p.color, ...(p.style||{}) }}>📂</Icn>;
+const IcoLock = (p) => <Icn {...p} style={{ color: p.color, ...(p.style||{}) }}>🔒</Icn>;
+
+// ---------- Visual tokens ----------
+// Background: ink navy #14132B / cards: #211F45 / accent hot coral #FF5A5F
+// secondary electric lime #C8FF4D / text #F5F3FF / muted #9C97C4
+
+const TILE_STYLES = [
+  { bg: "#FF5A5F", shape: "▲" },
+  { bg: "#4D7CFF", shape: "◆" },
+  { bg: "#C8FF4D", shape: "●" },
+  { bg: "#FFB23E", shape: "■" },
+  { bg: "#B388FF", shape: "★" },
+  { bg: "#3EE6C4", shape: "▶" },
+  { bg: "#FF7AC6", shape: "⬣" },
+  { bg: "#7DD3FC", shape: "◉" },
+];
+
+const QUESTION_TYPES = [
+  { id: "single", label: "Choix unique" },
+  { id: "multi", label: "Choix multiple" },
+  { id: "poll", label: "Sondage" },
+  { id: "wordcloud", label: "Nuage de mots" },
+];
+const MAX_CHOICES = 8;
+const MIN_CHOICES = 2;
+
+const PLAYER_COLORS = [
+  "#FF5A5F", "#4D7CFF", "#C8FF4D", "#FFB23E",
+  "#B388FF", "#3EE6C4", "#FF7AC6", "#7DD3FC",
+  "#FFD23E", "#84E296",
+];
+function colorForIndex(i) {
+  return PLAYER_COLORS[i % PLAYER_COLORS.length];
+}
+
+function genCode() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+function genId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+const LOCAL_PLAYER_KEY = "quizarena_player_session";
+const HOST_PIN = "Qual2026*";
+const QR_SCRIPT_ID = "quiz-arena-qrcode-lib"; // déjà chargé via <script> dans le <head>
+
+function QRCodeBox({ value, size = 168 }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!ref.current || !window.QRCode) return;
+    ref.current.innerHTML = "";
+    new window.QRCode(ref.current, {
+      text: value,
+      width: size,
+      height: size,
+      colorDark: "#14132B",
+      colorLight: "#F5F3FF",
+    });
+  }, [value, size]);
+  return (
+    <div style={{ background: "#F5F3FF", padding: 10, borderRadius: 12, display: "inline-flex", minWidth: size, minHeight: size, alignItems: "center", justifyContent: "center" }}>
+      <div ref={ref} />
+    </div>
+  );
+}
+
+const DEFAULT_QUIZ = {
+  id: genId(),
+  title: "Quiz sans titre",
+  questions: [
+    {
+      id: genId(),
+      type: "single",
+      text: "Quelle est la capitale de la France ?",
+      choices: ["Lyon", "Paris", "Marseille", "Nice"],
+      correct: 1,
+      duration: 20,
+    },
+    {
+      id: genId(),
+      type: "single",
+      text: "2 + 2 × 2 = ?",
+      choices: ["8", "6", "4", "10"],
+      correct: 1,
+      duration: 20,
+    },
+  ],
+};
+
+// =========================================================
+// Root
+// =========================================================
+function QuizArena() {
+  const initialRoomFromUrl = (() => {
+    try {
+      return new URLSearchParams(window.location.search).get("room") || "";
+    } catch {
+      return "";
+    }
+  })();
+  const [mode, setMode] = useState(initialRoomFromUrl ? "join" : "home");
+  const [hostUnlocked, setHostUnlocked] = useState(false);
+  const [showPinPrompt, setShowPinPrompt] = useState(false);
+
+  const requestHost = () => {
+    if (hostUnlocked) setMode("host");
+    else setShowPinPrompt(true);
+  };
+
+  return (
+    <div style={{ fontFamily: "Inter, sans-serif", background: "#14132B", minHeight: "100vh", color: "#F5F3FF", display: "flex", flexDirection: "column" }}>
+      {!dbReady && (
+        <div style={{ background: "#FF5A5F", color: "#14132B", textAlign: "center", padding: "8px 12px", fontSize: 13, fontWeight: 700 }}>
+          ⚠️ Configuration Firebase manquante ou invalide — édite FIREBASE_CONFIG dans index.html
+        </div>
+      )}
+      {mode === "home" && <Home onJoin={() => setMode("join")} onHostRequest={requestHost} />}
+      {mode === "host" && <HostFlow onExit={() => setMode("home")} />}
+      {mode === "join" && <PlayerFlow onExit={() => setMode("home")} initialCode={initialRoomFromUrl} />}
+      {showPinPrompt && (
+        <PinPrompt
+          onCancel={() => setShowPinPrompt(false)}
+          onSuccess={() => { setHostUnlocked(true); setShowPinPrompt(false); setMode("host"); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function PinPrompt({ onCancel, onSuccess }) {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState("");
+  const submit = () => {
+    if (value === HOST_PIN) onSuccess();
+    else setError("Code incorrect.");
+  };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(20,19,43,0.85)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, zIndex: 50 }} onClick={onCancel}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#211F45", borderRadius: 18, padding: 28, width: "100%", maxWidth: 360, display: "flex", flexDirection: "column", gap: 14, alignItems: "center" }}>
+        <IcoLock size={28} color="#C8FF4D" />
+        <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", margin: 0, fontSize: 20 }}>Espace organisateur</h3>
+        <input
+          type="password"
+          autoFocus
+          value={value}
+          onChange={(e) => { setValue(e.target.value); setError(""); }}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          placeholder="Code d'accès"
+          style={{ ...joinInput, width: "100%", textAlign: "center" }}
+        />
+        {error && <p style={{ color: "#FF5A5F", fontSize: 13, margin: 0 }}>{error}</p>}
+        <div style={{ display: "flex", gap: 10, width: "100%" }}>
+          <button onClick={onCancel} style={{ ...ghostBtn, flex: 1, justifyContent: "center", border: "2px solid #3B3768" }}>Annuler</button>
+          <button onClick={submit} style={{ ...btnStyle, background: "#C8FF4D", color: "#14132B", flex: 1, justifyContent: "center" }}>Valider</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Home({ onJoin, onHostRequest }) {
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center", gap: 28 }}>
+      <div>
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "#211F45", padding: "6px 14px", borderRadius: 999, fontSize: 13, color: "#C8FF4D", fontWeight: 600, marginBottom: 18 }}>
+          <IcoZap size={14} /> Quiz en direct, multi-écrans
+        </div>
+        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "clamp(40px,8vw,72px)", fontWeight: 700, margin: 0, lineHeight: 1.02 }}>
+          Quiz<span style={{ color: "#FF5A5F" }}>Arena</span>
+        </h1>
+        <p style={{ color: "#9C97C4", fontSize: 17, marginTop: 12, maxWidth: 420 }}>
+          Un écran qui anime, des téléphones qui répondent. Crée ta partie ou rejoins avec un code.
+        </p>
+      </div>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", justifyContent: "center" }}>
+        <button onClick={onJoin} style={{ ...btnStyle, background: "#FF5A5F", color: "#14132B" }}>
+          <IcoUsers size={18} /> Rejoindre avec un code
+        </button>
+      </div>
+      <button onClick={onHostRequest} style={{ background: "none", border: "none", color: "#605C92", fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, marginTop: -6 }}>
+        <IcoLock size={13} /> Espace organisateur
+      </button>
+    </div>
+  );
+}
+
+const btnStyle = { display: "inline-flex", alignItems: "center", gap: 10, fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16, padding: "14px 26px", borderRadius: 14, border: "none", cursor: "pointer" };
+
+// =========================================================
+// HOST FLOW
+// =========================================================
+function HostFlow({ onExit }) {
+  const [stage, setStage] = useState("library");
+  const [quiz, setQuiz] = useState(DEFAULT_QUIZ);
+  const [library, setLibrary] = useState(null);
+  const [roomCode, setRoomCode] = useState(null);
+  const [hostId] = useState(() => genId());
+  const [room, setRoom] = useState(null);
+  const [answers, setAnswers] = useState({});
+
+  useEffect(() => { setLibrary(loadLibrary()); }, []);
+
+  const openQuiz = (q) => { setQuiz(q); setStage("edit"); };
+  const createNew = () => { setQuiz({ ...DEFAULT_QUIZ, id: genId(), title: "Nouveau quiz" }); setStage("edit"); };
+  const persistQuiz = (q) => setLibrary(saveToLibrary(q));
+  const removeFromLibrary = (id) => setLibrary(deleteFromLibrary(id));
+
+  const roomPath = roomCode ? `rooms/${roomCode}` : null;
+
+  const pushRoom = useCallback(async (next) => {
+    if (!roomPath) return;
+    setRoom(next);
+    await dbSet(roomPath, next);
+  }, [roomPath]);
+
+  const startRoom = async () => {
+    persistQuiz(quiz);
+    const code = genCode();
+    const initial = { hostId, status: "lobby", quiz, currentQ: -1, questionStartTs: null, players: [] };
+    setRoomCode(code);
+    await dbSet(`rooms/${code}`, initial);
+    setRoom(initial);
+    setStage("lobby");
+  };
+
+  // Écoute en direct de la salle (remplace le polling)
+  useEffect(() => {
+    if (!roomPath) return;
+    const unsub = dbListen(roomPath, (r) => { if (r) setRoom(r); });
+    return unsub;
+  }, [roomPath]);
+
+  // Écoute en direct des réponses de la question en cours
+  useEffect(() => {
+    if (!roomPath || !room || room.status !== "question") return;
+    const unsub = dbListen(`${roomPath}/answersByQ/${room.currentQ}`, (a) => setAnswers(a || {}));
+    return unsub;
+  }, [roomPath, room?.status, room?.currentQ]);
+
+  const nextQuestion = async () => {
+    const nq = (room.currentQ ?? -1) + 1;
+    if (nq >= quiz.questions.length) {
+      await pushRoom({ ...room, status: "end" });
+      setStage("end");
+      return;
+    }
+    setAnswers({});
+    await dbSet(`${roomPath}/answersByQ/${nq}`, {});
+    await pushRoom({ ...room, status: "question", currentQ: nq, questionStartTs: Date.now() });
+    setStage("playing");
+  };
+
+  const revealAnswer = async () => {
+    const q = quiz.questions[room.currentQ];
+    const a = (await dbGet(`${roomPath}/answersByQ/${room.currentQ}`)) || {};
+    const players = room.players.map((p) => {
+      const ans = a[p.id];
+      let score = p.score || 0;
+      if (ans && (q.type === "single" || !q.type)) {
+        if (ans.choice === q.correct) {
+          const elapsed = ans.time - room.questionStartTs;
+          const speedBonus = Math.max(0, 1000 - Math.floor(elapsed / 30));
+          score += 500 + speedBonus;
+        }
+      } else if (ans && q.type === "multi") {
+        const correctSet = new Set(Array.isArray(q.correct) ? q.correct : []);
+        const givenSet = new Set(Array.isArray(ans.choice) ? ans.choice : []);
+        const exactMatch = correctSet.size === givenSet.size && [...correctSet].every((c) => givenSet.has(c));
+        if (exactMatch) {
+          const elapsed = ans.time - room.questionStartTs;
+          const speedBonus = Math.max(0, 1000 - Math.floor(elapsed / 30));
+          score += 500 + speedBonus;
+        }
+      }
+      return { ...p, score };
+    });
+    await pushRoom({ ...room, status: "reveal", players });
+    setStage("reveal");
+  };
+
+  if (stage === "library") {
+    return <QuizLibrary library={library} onOpen={openQuiz} onCreateNew={createNew} onDelete={removeFromLibrary} onExit={onExit} />;
+  }
+  if (stage === "edit") {
+    return <QuizEditor quiz={quiz} setQuiz={setQuiz} onExit={() => setStage("library")} onStart={startRoom} onSave={persistQuiz} />;
+  }
+  if (!room) return <CenteredMsg text="Création de la salle…" />;
+  if (stage === "lobby") return <HostLobby room={room} roomCode={roomCode} onLaunch={nextQuestion} onExit={onExit} />;
+  if (stage === "playing" || room.status === "question") {
+    return <HostQuestion quiz={quiz} room={room} answers={answers} onReveal={revealAnswer} />;
+  }
+  if (stage === "reveal" || room.status === "reveal") {
+    const q = quiz.questions[room.currentQ];
+    const isLast = room.currentQ >= quiz.questions.length - 1;
+    return <HostReveal q={q} room={room} answers={answers} isLast={isLast} onNext={nextQuestion} />;
+  }
+  if (stage === "end" || room.status === "end") {
+    return <Leaderboard players={room.players} onExit={onExit} title="Résultats finaux" />;
+  }
+  return <CenteredMsg text="…" />;
+}
+
+function CenteredMsg({ text }) {
+  return <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}><p style={{ color: "#9C97C4" }}>{text}</p></div>;
+}
+
+// ---------- Quiz library ----------
+function QuizLibrary({ library, onOpen, onCreateNew, onDelete, onExit }) {
+  if (library === null) return <CenteredMsg text="Chargement de tes quiz…" />;
+  return (
+    <div style={{ padding: "24px 18px 60px", maxWidth: 760, margin: "0 auto", width: "100%" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 22 }}>
+        <button onClick={onExit} style={{ ...ghostBtn }}>← Accueil</button>
+        <span style={{ color: "#9C97C4", fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}><IcoBook size={14} /> Mes quiz</span>
+      </div>
+      <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, marginBottom: 18 }}>Choisis un quiz</h2>
+      <button onClick={onCreateNew} style={{ ...btnStyle, background: "#FF5A5F", color: "#14132B", width: "100%", justifyContent: "center", marginBottom: 18 }}>
+        <IcoPlus size={18} /> Nouveau quiz
+      </button>
+      {library.length === 0 && <p style={{ color: "#605C92", textAlign: "center", marginTop: 30 }}>Aucun quiz enregistré pour l'instant. Crées-en un !</p>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {library.map((q) => (
+          <div key={q.id} style={{ ...cardStyle, display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", gap: 12 }} onClick={() => onOpen(q)}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+              <IcoFolder size={20} color="#C8FF4D" />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.title}</div>
+                <div style={{ color: "#9C97C4", fontSize: 13 }}>{q.questions.length} question{q.questions.length !== 1 ? "s" : ""}</div>
+              </div>
+            </div>
+            <button onClick={(e) => { e.stopPropagation(); onDelete(q.id); }} style={{ background: "none", border: "none", color: "#FF5A5F", cursor: "pointer", flexShrink: 0 }}>
+              <IcoTrash size={18} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Quiz editor ----------
+function QuizEditor({ quiz, setQuiz, onExit, onStart, onSave }) {
+  const update = (patch) => setQuiz({ ...quiz, ...patch });
+  const updateQ = (idx, patch) => { const qs = quiz.questions.slice(); qs[idx] = { ...qs[idx], ...patch }; update({ questions: qs }); };
+  const updateChoice = (qIdx, cIdx, value) => { const qs = quiz.questions.slice(); const choices = qs[qIdx].choices.slice(); choices[cIdx] = value; qs[qIdx] = { ...qs[qIdx], choices }; update({ questions: qs }); };
+
+  const setType = (qIdx, type) => {
+    const q = quiz.questions[qIdx];
+    let patch = { type };
+    if (type === "single" && Array.isArray(q.correct)) patch.correct = q.correct[0] ?? 0;
+    if (type === "multi" && !Array.isArray(q.correct)) patch.correct = typeof q.correct === "number" ? [q.correct] : [];
+    if (type === "poll") patch.correct = null;
+    updateQ(qIdx, patch);
+  };
+  const toggleCorrect = (qIdx, cIdx) => {
+    const q = quiz.questions[qIdx];
+    if (q.type === "multi") {
+      const set = new Set(Array.isArray(q.correct) ? q.correct : []);
+      set.has(cIdx) ? set.delete(cIdx) : set.add(cIdx);
+      updateQ(qIdx, { correct: Array.from(set).sort() });
+    } else {
+      updateQ(qIdx, { correct: cIdx });
+    }
+  };
+  const addChoice = (qIdx) => { const q = quiz.questions[qIdx]; if (q.choices.length >= MAX_CHOICES) return; updateQ(qIdx, { choices: [...q.choices, `Réponse ${q.choices.length + 1}`] }); };
+  const removeChoice = (qIdx, cIdx) => {
+    const q = quiz.questions[qIdx];
+    if (q.choices.length <= MIN_CHOICES) return;
+    const choices = q.choices.filter((_, i) => i !== cIdx);
+    let correct = q.correct;
+    if (q.type === "multi") correct = (Array.isArray(correct) ? correct : []).filter((i) => i !== cIdx).map((i) => (i > cIdx ? i - 1 : i));
+    else if (typeof correct === "number") { if (correct === cIdx) correct = 0; else if (correct > cIdx) correct -= 1; }
+    updateQ(qIdx, { choices, correct });
+  };
+  const addQuestion = () => update({ questions: [...quiz.questions, { id: genId(), type: "single", text: "Nouvelle question", choices: ["Réponse 1", "Réponse 2", "Réponse 3", "Réponse 4"], correct: 0, duration: 20 }] });
+  const removeQuestion = (idx) => { const qs = quiz.questions.slice(); qs.splice(idx, 1); update({ questions: qs }); };
+
+  return (
+    <div style={{ padding: "24px 18px 60px", maxWidth: 760, margin: "0 auto", width: "100%" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+        <button onClick={onExit} style={{ ...ghostBtn }}>← Accueil</button>
+        <span style={{ color: "#9C97C4", fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}><IcoEdit size={14} /> Éditeur de quiz</span>
+      </div>
+      <input value={quiz.title} onChange={(e) => update({ title: e.target.value })} style={titleInput} placeholder="Titre du quiz" />
+      {quiz.questions.map((q, qIdx) => {
+        const type = q.type || "single";
+        const correctSet = type === "multi" ? new Set(Array.isArray(q.correct) ? q.correct : []) : null;
+        return (
+          <div key={q.id} style={cardStyle}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+              <span style={{ color: "#9C97C4", fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700 }}>Q{qIdx + 1}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, color: "#9C97C4", fontSize: 13 }}>
+                  <IcoClock size={14} />
+                  <input type="number" min={5} max={120} value={q.duration} onChange={(e) => updateQ(qIdx, { duration: Number(e.target.value) || 20 })} style={{ width: 50, ...miniInput }} />s
+                </label>
+                <button onClick={() => removeQuestion(qIdx)} style={{ background: "none", border: "none", color: "#FF5A5F", cursor: "pointer" }}><IcoTrash size={18} /></button>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+              {QUESTION_TYPES.map((t) => (
+                <button key={t.id} onClick={() => setType(qIdx, t.id)} style={{ background: type === t.id ? "#FF5A5F" : "#181733", color: type === t.id ? "#14132B" : "#9C97C4", border: "none", borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>{t.label}</button>
+              ))}
+            </div>
+            <textarea value={q.text} onChange={(e) => updateQ(qIdx, { text: e.target.value })} style={questionInput} rows={2} />
+            {type === "wordcloud" ? (
+              <p style={{ color: "#605C92", fontSize: 13, marginTop: 6 }}>Question ouverte : chaque joueur tape un mot ou une courte phrase, affichés ensuite en nuage de mots.</p>
+            ) : (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
+                  {q.choices.map((c, cIdx) => {
+                    const isCorrect = type === "poll" ? false : type === "multi" ? correctSet.has(cIdx) : q.correct === cIdx;
+                    return (
+                      <div key={cIdx} style={{ display: "flex", alignItems: "center", gap: 8, background: "#181733", borderRadius: 10, padding: "6px 10px", border: isCorrect ? "2px solid #C8FF4D" : "2px solid transparent" }}>
+                        {type !== "poll" && (
+                          <button onClick={() => toggleCorrect(qIdx, cIdx)} style={{ width: 22, height: 22, borderRadius: type === "multi" ? 6 : 999, border: "none", flexShrink: 0, background: TILE_STYLES[cIdx % TILE_STYLES.length].bg, cursor: "pointer", color: "#14132B", fontSize: 11, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            {isCorrect ? "✓" : ""}
+                          </button>
+                        )}
+                        {type === "poll" && <span style={{ width: 22, height: 22, borderRadius: 999, flexShrink: 0, background: TILE_STYLES[cIdx % TILE_STYLES.length].bg }} />}
+                        <input value={c} onChange={(e) => updateChoice(qIdx, cIdx, e.target.value)} style={choiceInput} />
+                        {q.choices.length > MIN_CHOICES && (
+                          <button onClick={() => removeChoice(qIdx, cIdx)} style={{ background: "none", border: "none", color: "#605C92", cursor: "pointer", flexShrink: 0 }}>✕</button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {q.choices.length < MAX_CHOICES && (
+                  <button onClick={() => addChoice(qIdx)} style={{ ...ghostBtn, marginTop: 10, padding: "6px 12px", fontSize: 12 }}><IcoPlus size={14} /> Ajouter une réponse</button>
+                )}
+              </>
+            )}
+          </div>
+        );
+      })}
+      <button onClick={addQuestion} style={{ ...ghostBtn, width: "100%", justifyContent: "center", marginTop: 6 }}><IcoPlus size={16} /> Ajouter une question</button>
+      <div style={{ display: "flex", gap: 12, marginTop: 22 }}>
+        <button onClick={() => onSave(quiz)} style={{ ...ghostBtn, flex: 1, justifyContent: "center", border: "2px solid #3B3768" }}><IcoSave size={16} /> Enregistrer</button>
+        <button onClick={onStart} disabled={quiz.questions.length === 0} style={{ ...btnStyle, background: "#FF5A5F", color: "#14132B", flex: 1, justifyContent: "center", opacity: quiz.questions.length === 0 ? 0.5 : 1 }}><IcoPlay size={18} /> Créer la salle</button>
+      </div>
+    </div>
+  );
+}
+
+const cardStyle = { background: "#211F45", borderRadius: 16, padding: 16, marginBottom: 14 };
+const titleInput = { width: "100%", background: "transparent", border: "none", borderBottom: "2px solid #3B3768", color: "#F5F3FF", fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 26, padding: "8px 0", marginBottom: 22, outline: "none" };
+const questionInput = { width: "100%", background: "#181733", border: "1px solid #3B3768", borderRadius: 10, color: "#F5F3FF", fontSize: 15, padding: 10, marginTop: 10, resize: "vertical", fontFamily: "Inter, sans-serif" };
+const choiceInput = { flex: 1, background: "transparent", border: "none", color: "#F5F3FF", fontSize: 14, outline: "none" };
+const miniInput = { background: "#181733", border: "1px solid #3B3768", borderRadius: 6, color: "#F5F3FF", padding: "2px 4px", textAlign: "center" };
+const ghostBtn = { display: "inline-flex", alignItems: "center", gap: 8, background: "#211F45", color: "#F5F3FF", border: "none", borderRadius: 10, padding: "10px 16px", fontSize: 14, fontWeight: 600, cursor: "pointer" };
+
+// ---------- Host lobby ----------
+function HostLobby({ room, roomCode, onLaunch, onExit }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => { navigator.clipboard?.writeText(roomCode); setCopied(true); setTimeout(() => setCopied(false), 1500); };
+  const joinUrl = (() => {
+    try { const url = new URL(window.location.href); url.searchParams.set("room", roomCode); return url.toString(); }
+    catch { return roomCode; }
+  })();
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, gap: 28 }}>
+      <button onClick={onExit} style={{ ...ghostBtn, position: "absolute", top: 20, left: 20 }}>← Quitter</button>
+      <p style={{ color: "#9C97C4", fontSize: 14, letterSpacing: 1, textTransform: "uppercase" }}>Rejoins sur QuizArena</p>
+      <button onClick={copy} style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "clamp(48px,12vw,96px)", fontWeight: 700, letterSpacing: 6, background: "#211F45", padding: "14px 36px", borderRadius: 20, border: "2px dashed #FF5A5F", color: "#F5F3FF", cursor: "pointer", display: "flex", alignItems: "center", gap: 16 }}>
+        {roomCode}
+        <IcoCopy size={28} color={copied ? "#C8FF4D" : "#9C97C4"} />
+      </button>
+      {copied && <span style={{ color: "#C8FF4D", fontSize: 13 }}>Code copié !</span>}
+      <QRCodeBox value={joinUrl} />
+      <p style={{ color: "#605C92", fontSize: 12, maxWidth: 280, textAlign: "center" }}>Scanner ce code ouvre directement la page de connexion avec le code pré-rempli.</p>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, color: "#F5F3FF", fontSize: 18, fontWeight: 700 }}><IcoUsers size={20} /> {room.players.length} joueur{room.players.length !== 1 ? "s" : ""}</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center", maxWidth: 600 }}>
+        {room.players.map((p) => (
+          <span key={p.id} style={{ background: p.color || "#FF5A5F", color: "#14132B", padding: "8px 16px", borderRadius: 999, fontWeight: 700, fontSize: 14 }}>{p.name}</span>
+        ))}
+        {room.players.length === 0 && <span style={{ color: "#605C92", fontSize: 14 }}>En attente de joueurs…</span>}
+      </div>
+      <button onClick={onLaunch} disabled={room.players.length === 0} style={{ ...btnStyle, background: "#C8FF4D", color: "#14132B", opacity: room.players.length === 0 ? 0.5 : 1 }}><IcoPlay size={18} /> Lancer la partie</button>
+    </div>
+  );
+}
+
+// ---------- Host: question in progress ----------
+function HostQuestion({ quiz, room, answers, onReveal }) {
+  const q = quiz.questions[room.currentQ];
+  const [remaining, setRemaining] = useState(q.duration);
+  useEffect(() => {
+    setRemaining(q.duration);
+    const start = room.questionStartTs;
+    const t = setInterval(() => {
+      const left = q.duration - Math.floor((Date.now() - start) / 1000);
+      setRemaining(Math.max(0, left));
+      if (left <= 0) clearInterval(t);
+    }, 250);
+    return () => clearInterval(t);
+  }, [room.currentQ, room.questionStartTs, q.duration]);
+
+  const answeredCount = Object.keys(answers || {}).length;
+  const pct = q.duration ? Math.max(0, remaining / q.duration) : 0;
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: "30px 20px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+        <span style={{ color: "#9C97C4", fontWeight: 700 }}>Question {room.currentQ + 1} / {quiz.questions.length}</span>
+        <TimerRing remaining={remaining} pct={pct} />
+        <span style={{ display: "flex", alignItems: "center", gap: 8, color: "#F5F3FF", fontWeight: 700 }}><IcoUsers size={18} /> {answeredCount}/{room.players.length}</span>
+      </div>
+      <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "clamp(26px,5vw,44px)", textAlign: "center", margin: "10px 0 36px", lineHeight: 1.15 }}>{q.text}</h2>
+      <div style={ q.type === "wordcloud"
+          ? { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", flex: 1 }
+          : { display: "grid", gridTemplateColumns: q.choices.length > 4 ? "1fr 1fr 1fr" : "1fr 1fr", gap: 16, maxWidth: 760, margin: "0 auto", width: "100%", flex: 1, alignContent: "start" }
+      }>
+        {q.type === "wordcloud" ? (
+          <>
+            <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 64, fontWeight: 700, color: "#C8FF4D" }}>{answeredCount}</span>
+            <span style={{ color: "#9C97C4" }}>réponse{answeredCount !== 1 ? "s" : ""} envoyée{answeredCount !== 1 ? "s" : ""}</span>
+          </>
+        ) : (
+          q.choices.map((c, i) => (
+            <div key={i} style={{ background: TILE_STYLES[i % TILE_STYLES.length].bg, color: "#14132B", borderRadius: 16, padding: 22, display: "flex", alignItems: "center", gap: 14, fontWeight: 700, fontSize: 18 }}>
+              <span style={{ fontSize: 24 }}>{TILE_STYLES[i % TILE_STYLES.length].shape}</span>{c}
+            </div>
+          ))
+        )}
+      </div>
+      {q.type === "multi" && <p style={{ textAlign: "center", color: "#605C92", fontSize: 13, marginTop: 8 }}>Plusieurs réponses possibles</p>}
+      <button onClick={onReveal} style={{ ...btnStyle, background: "#211F45", color: "#F5F3FF", margin: "26px auto 0", border: "2px solid #3B3768" }}>Voir les résultats <IcoArrowRight size={18} /></button>
+    </div>
+  );
+}
+
+function TimerRing({ remaining, pct }) {
+  const r = 26;
+  const circ = 2 * Math.PI * r;
+  return (
+    <div style={{ position: "relative", width: 64, height: 64 }}>
+      <svg width="64" height="64">
+        <circle cx="32" cy="32" r={r} stroke="#3B3768" strokeWidth="6" fill="none" />
+        <circle cx="32" cy="32" r={r} stroke="#FF5A5F" strokeWidth="6" fill="none" strokeDasharray={circ} strokeDashoffset={circ * (1 - pct)} strokeLinecap="round" transform="rotate(-90 32 32)" style={{ transition: "stroke-dashoffset 0.25s linear" }} />
+      </svg>
+      <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontFamily: "'Space Grotesk', sans-serif" }}>{remaining}</span>
+    </div>
+  );
+}
+
+// ---------- Host: reveal ----------
+function HostReveal({ q, room, answers, isLast, onNext }) {
+  const counts = new Array((q.choices || []).length).fill(0);
+  Object.values(answers || {}).forEach((a) => {
+    if (!a) return;
+    if (typeof a.choice === "number") counts[a.choice]++;
+    else if (Array.isArray(a.choice)) a.choice.forEach((c) => counts[c] !== undefined && counts[c]++);
+  });
+  const total = Object.keys(answers || {}).length || 1;
+  const top5 = [...room.players].sort((a, b) => b.score - a.score).slice(0, 5);
+  const isMulti = q.type === "multi";
+  const isPoll = q.type === "poll";
+  const isWordcloud = q.type === "wordcloud";
+  const correctSet = isMulti ? new Set(Array.isArray(q.correct) ? q.correct : []) : null;
+
+  const words = isWordcloud ? (() => {
+    const freq = {};
+    Object.values(answers || {}).forEach((a) => {
+      const w = (a?.choice || "").trim();
+      if (!w) return;
+      const key = w.toLowerCase();
+      freq[key] = freq[key] || { label: w, count: 0 };
+      freq[key].count++;
+    });
+    return Object.values(freq).sort((a, b) => b.count - a.count);
+  })() : [];
+  const maxCount = words.length ? words[0].count : 1;
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: "30px 20px", maxWidth: 760, margin: "0 auto", width: "100%" }}>
+      <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, textAlign: "center", marginBottom: 24 }}>{q.text}</h2>
+      {isWordcloud ? (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center", justifyContent: "center", padding: "20px 10px", marginBottom: 30, minHeight: 160 }}>
+          {words.length === 0 && <p style={{ color: "#605C92" }}>Aucune réponse reçue.</p>}
+          {words.map((w, i) => (
+            <span key={w.label + i} style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, color: TILE_STYLES[i % TILE_STYLES.length].bg, fontSize: 14 + (w.count / maxCount) * 38, lineHeight: 1 }}>{w.label}</span>
+          ))}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 30 }}>
+          {q.choices.map((c, i) => {
+            const isCorrect = isPoll ? false : isMulti ? correctSet.has(i) : i === q.correct;
+            const pct = Math.round((counts[i] / total) * 100);
+            return (
+              <div key={i} style={{ position: "relative", background: "#211F45", borderRadius: 12, overflow: "hidden", padding: "14px 16px", border: isCorrect ? "2px solid #C8FF4D" : "2px solid transparent" }}>
+                <div style={{ position: "absolute", inset: 0, width: `${pct}%`, background: TILE_STYLES[i % TILE_STYLES.length].bg, opacity: 0.25 }} />
+                <div style={{ position: "relative", display: "flex", justifyContent: "space-between", fontWeight: 700 }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 10 }}>{isPoll ? null : isCorrect ? <IcoCheck size={18} color="#C8FF4D" /> : <IcoX size={18} color="#605C92" />} {c}</span>
+                  <span>{counts[i]} ({pct}%)</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <h3 style={{ color: "#9C97C4", fontSize: 14, textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>Classement</h3>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 26 }}>
+        {top5.map((p, i) => (
+          <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#211F45", borderRadius: 10, padding: "10px 14px", fontWeight: 700, borderLeft: `5px solid ${p.color || "#9C97C4"}` }}>
+            <span>{i + 1}. {p.name}</span><span style={{ color: "#C8FF4D" }}>{p.score} pts</span>
+          </div>
+        ))}
+      </div>
+      <button onClick={onNext} style={{ ...btnStyle, background: "#FF5A5F", color: "#14132B", margin: "0 auto" }}>
+        {isLast ? <>Voir le classement final <IcoTrophy size={18} /></> : <>Question suivante <IcoArrowRight size={18} /></>}
+      </button>
+    </div>
+  );
+}
+
+function Leaderboard({ players, onExit, title }) {
+  const sorted = [...players].sort((a, b) => b.score - a.score);
+  const podium = sorted.slice(0, 3);
+  const rest = sorted.slice(3);
+  const [revealed, setRevealed] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setRevealed(true), 150); return () => clearTimeout(t); }, []);
+  const order = [podium[1], podium[0], podium[2]];
+  const heights = [128, 168, 96];
+  const medalColor = ["#C7CDD9", "#FFD23E", "#E8985E"];
+  const delays = [200, 0, 350];
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "24px 20px" }}>
+      <style>{`@keyframes podiumRise { from { transform: translateY(40px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }`}</style>
+      <IcoTrophy size={36} color="#C8FF4D" />
+      <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 28, margin: "8px 0 30px" }}>{title}</h2>
+      {sorted.length === 0 ? <p style={{ color: "#9C97C4" }}>Aucun joueur.</p> : (
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 14, marginBottom: 36 }}>
+          {order.map((p, i) => p ? (
+            <div key={p.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 110, opacity: revealed ? 1 : 0, animation: revealed ? `podiumRise 0.5s ${delays[i]}ms ease-out both` : "none" }}>
+              <div style={{ width: 44, height: 44, borderRadius: "50%", background: p.color || "#9C97C4", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, color: "#14132B", marginBottom: 8, border: `3px solid ${medalColor[i]}` }}>{p.name.slice(0, 2).toUpperCase()}</div>
+              <span style={{ fontWeight: 700, fontSize: 14, marginBottom: 6, maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+              <span style={{ color: "#C8FF4D", fontWeight: 700, fontSize: 13, marginBottom: 8 }}>{p.score} pts</span>
+              <div style={{ width: "100%", height: heights[i], background: "#211F45", borderRadius: "10px 10px 0 0", borderTop: `4px solid ${medalColor[i]}`, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 10, fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 22, color: medalColor[i] }}>{i === 1 ? 1 : i === 0 ? 2 : 3}</div>
+            </div>
+          ) : <div key={`empty-${i}`} style={{ width: 110 }} />)}
+        </div>
+      )}
+      {rest.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%", maxWidth: 420 }}>
+          {rest.map((p, i) => (
+            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#211F45", borderRadius: 12, padding: "10px 16px", fontWeight: 700, fontSize: 14, borderLeft: `4px solid ${p.color || "#605C92"}` }}>
+              <span>{i + 4}. {p.name}</span><span style={{ color: "#9C97C4" }}>{p.score} pts</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <button onClick={onExit} style={{ ...btnStyle, background: "#211F45", color: "#F5F3FF", marginTop: 28, border: "2px solid #3B3768" }}>Retour à l'accueil</button>
+    </div>
+  );
+}
+
+// =========================================================
+// PLAYER FLOW
+// =========================================================
+function PlayerFlow({ onExit, initialCode = "" }) {
+  const [code, setCode] = useState(initialCode);
+  const [name, setName] = useState("");
+  const [playerId, setPlayerId] = useState(() => genId());
+  const [joined, setJoined] = useState(false);
+  const [room, setRoom] = useState(null);
+  const [error, setError] = useState("");
+  const [lastAnsweredQ, setLastAnsweredQ] = useState(-1);
+  const [pickedChoice, setPickedChoice] = useState(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [multiSelection, setMultiSelection] = useState([]);
+  const [wordInput, setWordInput] = useState("");
+
+  const roomPath = `rooms/${code}`;
+
+  useEffect(() => {
+    (async () => {
+      const raw = localStorage.getItem(LOCAL_PLAYER_KEY);
+      if (!raw) { setCheckingSession(false); return; }
+      try {
+        const saved = JSON.parse(raw);
+        const r = await dbGet(`rooms/${saved.code}`);
+        if (r && r.status !== "end") {
+          setCode(saved.code); setName(saved.name); setPlayerId(saved.playerId);
+          const exists = r.players.some((p) => p.id === saved.playerId);
+          let nextRoom = r;
+          if (!exists) {
+            const players = [...r.players, { id: saved.playerId, name: saved.name, score: 0, color: saved.color }];
+            nextRoom = { ...r, players };
+            await dbSet(`rooms/${saved.code}`, nextRoom);
+          }
+          setRoom(nextRoom);
+          setJoined(true);
+        } else {
+          localStorage.removeItem(LOCAL_PLAYER_KEY);
+        }
+      } catch { localStorage.removeItem(LOCAL_PLAYER_KEY); }
+      setCheckingSession(false);
+    })();
+  }, []);
+
+  const join = async () => {
+    if (!code.trim() || !name.trim()) { setError("Entre un code et ton prénom."); return; }
+    const r = await dbGet(`rooms/${code.trim()}`);
+    if (!r) { setError("Code introuvable."); return; }
+    const color = colorForIndex(r.players.length);
+    const players = [...r.players, { id: playerId, name: name.trim(), score: 0, color }];
+    const next = { ...r, players };
+    await dbSet(`rooms/${code.trim()}`, next);
+    setRoom(next); setJoined(true); setError("");
+    localStorage.setItem(LOCAL_PLAYER_KEY, JSON.stringify({ code: code.trim(), name: name.trim(), playerId, color }));
+  };
+
+  // Écoute en direct de la salle (remplace le polling)
+  useEffect(() => {
+    if (!joined) return;
+    const unsub = dbListen(roomPath, (r) => { if (r) setRoom(r); });
+    return unsub;
+  }, [joined, roomPath]);
+
+  useEffect(() => {
+    if (room && room.currentQ !== lastAnsweredQ) { setPickedChoice(null); setMultiSelection([]); setWordInput(""); }
+  }, [room?.currentQ]);
+
+  const submitAnswer = async (choiceIdx) => {
+    if (pickedChoice !== null) return;
+    setPickedChoice(choiceIdx); setLastAnsweredQ(room.currentQ);
+    const path = `${roomPath}/answersByQ/${room.currentQ}/${playerId}`;
+    await dbSet(path, { choice: choiceIdx, time: Date.now() });
+  };
+  const toggleMultiChoice = (idx) => setMultiSelection((sel) => (sel.includes(idx) ? sel.filter((i) => i !== idx) : [...sel, idx]));
+  const submitMultiAnswer = async () => {
+    if (pickedChoice !== null) return;
+    setPickedChoice("sent"); setLastAnsweredQ(room.currentQ);
+    const path = `${roomPath}/answersByQ/${room.currentQ}/${playerId}`;
+    await dbSet(path, { choice: multiSelection.slice().sort(), time: Date.now() });
+  };
+  const submitWordAnswer = async () => {
+    if (pickedChoice !== null || !wordInput.trim()) return;
+    setPickedChoice("sent"); setLastAnsweredQ(room.currentQ);
+    const path = `${roomPath}/answersByQ/${room.currentQ}/${playerId}`;
+    await dbSet(path, { choice: wordInput.trim(), time: Date.now() });
+  };
+
+  useEffect(() => { if (room && room.status === "end") localStorage.removeItem(LOCAL_PLAYER_KEY); }, [room?.status]);
+
+  if (checkingSession) return <CenteredMsg text="Connexion…" />;
+
+  if (!joined) {
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24, gap: 18 }}>
+        <button onClick={onExit} style={{ ...ghostBtn, position: "absolute", top: 20, left: 20 }}>← Accueil</button>
+        <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 32 }}>Rejoindre</h2>
+        <input value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="Code (4 chiffres)" style={{ ...joinInput, textAlign: "center", letterSpacing: 6, fontSize: 24 }} />
+        <input value={name} onChange={(e) => setName(e.target.value.slice(0, 18))} placeholder="Ton prénom" style={joinInput} />
+        {error && <p style={{ color: "#FF5A5F", fontSize: 14 }}>{error}</p>}
+        <button onClick={join} style={{ ...btnStyle, background: "#FF5A5F", color: "#14132B" }}>Rejoindre <IcoArrowRight size={18} /></button>
+      </div>
+    );
+  }
+
+  if (!room) return <CenteredMsg text="Connexion…" />;
+
+  if (room.status === "lobby") {
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14 }}>
+        <IcoUsers size={40} color="#C8FF4D" />
+        <h2 style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Salut {name} !</h2>
+        <p style={{ color: "#9C97C4" }}>En attente du lancement par l'hôte…</p>
+      </div>
+    );
+  }
+
+  if (room.status === "question") {
+    const currentQObj = room.quiz.questions[room.currentQ];
+    const qType = currentQObj.type || "single";
+
+    if (qType === "wordcloud") {
+      if (pickedChoice !== null) {
+        return <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12 }}><IcoCheck size={48} color="#C8FF4D" /><p style={{ fontSize: 20, fontWeight: 700 }}>Réponse envoyée !</p><p style={{ color: "#9C97C4" }}>En attente des autres joueurs…</p></div>;
+      }
+      return (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, padding: 24 }}>
+          <p style={{ color: "#9C97C4", textAlign: "center" }}>Tape un mot ou une courte phrase</p>
+          <input value={wordInput} onChange={(e) => setWordInput(e.target.value.slice(0, 40))} onKeyDown={(e) => e.key === "Enter" && submitWordAnswer()} placeholder="Ta réponse" style={{ ...joinInput, width: "100%", maxWidth: 320, textAlign: "center" }} autoFocus />
+          <button onClick={submitWordAnswer} style={{ ...btnStyle, background: "#FF5A5F", color: "#14132B" }}>Envoyer <IcoArrowRight size={18} /></button>
+        </div>
+      );
+    }
+
+    if (qType === "multi") {
+      if (pickedChoice !== null) {
+        return <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12 }}><IcoCheck size={48} color="#C8FF4D" /><p style={{ fontSize: 20, fontWeight: 700 }}>Réponse envoyée !</p><p style={{ color: "#9C97C4" }}>En attente des autres joueurs…</p></div>;
+      }
+      const nChoices = currentQObj.choices.length;
+      return (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: 16, gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, flex: 1 }}>
+            {Array.from({ length: nChoices }).map((_, i) => {
+              const selected = multiSelection.includes(i);
+              return (
+                <button key={i} onClick={() => toggleMultiChoice(i)} style={{ background: TILE_STYLES[i % TILE_STYLES.length].bg, border: selected ? "4px solid #F5F3FF" : "4px solid transparent", borderRadius: 18, color: "#14132B", fontSize: 36, fontWeight: 700, cursor: "pointer", opacity: selected ? 1 : 0.85 }}>
+                  {TILE_STYLES[i % TILE_STYLES.length].shape}
+                </button>
+              );
+            })}
+          </div>
+          <button onClick={submitMultiAnswer} disabled={multiSelection.length === 0} style={{ ...btnStyle, background: "#FF5A5F", color: "#14132B", justifyContent: "center", opacity: multiSelection.length === 0 ? 0.5 : 1 }}>Valider ({multiSelection.length}) <IcoArrowRight size={18} /></button>
+        </div>
+      );
+    }
+
+    if (pickedChoice !== null) {
+      return <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12 }}><IcoCheck size={48} color="#C8FF4D" /><p style={{ fontSize: 20, fontWeight: 700 }}>Réponse envoyée !</p><p style={{ color: "#9C97C4" }}>En attente des autres joueurs…</p></div>;
+    }
+    const nChoices = currentQObj.choices.length;
+    return (
+      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, padding: 16 }}>
+        {Array.from({ length: nChoices }).map((_, i) => (
+          <button key={i} onClick={() => submitAnswer(i)} style={{ background: TILE_STYLES[i % TILE_STYLES.length].bg, border: "none", borderRadius: 18, color: "#14132B", fontSize: 40, fontWeight: 700, cursor: "pointer" }}>
+            {TILE_STYLES[i % TILE_STYLES.length].shape}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  if (room.status === "reveal") {
+    const me = room.players.find((p) => p.id === playerId);
+    const q = room.quiz.questions[room.currentQ];
+    const qType = q.type || "single";
+    let feedback;
+    if (qType === "poll" || qType === "wordcloud") {
+      feedback = pickedChoice === null ? "none" : "participated";
+    } else if (qType === "multi") {
+      if (pickedChoice === null) feedback = "none";
+      else {
+        const correctSet = new Set(Array.isArray(q.correct) ? q.correct : []);
+        const givenSet = new Set(multiSelection);
+        const exact = correctSet.size === givenSet.size && [...correctSet].every((c) => givenSet.has(c));
+        feedback = exact ? "correct" : "wrong";
+      }
+    } else {
+      feedback = pickedChoice === null ? "none" : pickedChoice === q.correct ? "correct" : "wrong";
+    }
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10 }}>
+        {feedback === "none" && <p style={{ color: "#9C97C4" }}>Pas de réponse envoyée à temps.</p>}
+        {feedback === "correct" && <><IcoCheck size={48} color="#C8FF4D" /><p style={{ fontSize: 22, fontWeight: 700 }}>Bonne réponse !</p></>}
+        {feedback === "wrong" && <><IcoX size={48} color="#FF5A5F" /><p style={{ fontSize: 22, fontWeight: 700 }}>Raté !</p></>}
+        {feedback === "participated" && <><IcoCheck size={48} color="#C8FF4D" /><p style={{ fontSize: 22, fontWeight: 700 }}>Réponse enregistrée</p></>}
+        {(qType !== "poll" && qType !== "wordcloud") && <p style={{ color: "#9C97C4" }}>Score total : <strong style={{ color: "#F5F3FF" }}>{me?.score ?? 0}</strong> pts</p>}
+      </div>
+    );
+  }
+
+  if (room.status === "end") {
+    const sorted = [...room.players].sort((a, b) => b.score - a.score);
+    const myRank = sorted.findIndex((p) => p.id === playerId) + 1;
+    const me = sorted.find((p) => p.id === playerId);
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10 }}>
+        <IcoTrophy size={48} color="#C8FF4D" />
+        <h2 style={{ fontFamily: "'Space Grotesk', sans-serif" }}>Terminé !</h2>
+        <p style={{ fontSize: 18 }}>Tu finis <strong>{myRank}{myRank === 1 ? "er" : "ème"}</strong></p>
+        <p style={{ color: "#9C97C4" }}>{me?.score ?? 0} points</p>
+        <button onClick={onExit} style={{ ...btnStyle, background: "#211F45", color: "#F5F3FF", border: "2px solid #3B3768", marginTop: 16 }}>Retour à l'accueil</button>
+      </div>
+    );
+  }
+
+  return <CenteredMsg text="…" />;
+}
+
+const joinInput = { background: "#211F45", border: "2px solid #3B3768", borderRadius: 12, color: "#F5F3FF", padding: "14px 18px", fontSize: 16, width: 260, outline: "none" };
+
+ReactDOM.createRoot(document.getElementById("root")).render(<QuizArena />);
+</script>
+</body>
+</html>
