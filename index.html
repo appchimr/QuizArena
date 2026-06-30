@@ -36,10 +36,10 @@ const { useState, useEffect, useRef, useCallback } = React;
 // > "Vos applications" > config SDK).
 // =========================================================
 const FIREBASE_CONFIG = {
-  apiKey: "VOTRE_API_KEY",
-  authDomain: "VOTRE_PROJET.firebaseapp.com",
-  databaseURL: "https://VOTRE_PROJET-default-rtdb.firebaseio.com",
-  projectId: "VOTRE_PROJET",
+  apiKey: "AIzaSyBKC2TvEarEgVP9BRhAMwmho-NMQtzIR6I",
+  authDomain: "quizarena-bfea1.firebaseapp.com",
+  databaseURL: "https://quizarena-bfea1-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "quizarena-bfea1",
 };
 
 let dbReady = false;
@@ -53,18 +53,26 @@ const db = dbReady ? firebase.database() : null;
 
 function dbGet(path) {
   if (!db) return Promise.resolve(null);
-  return db.ref(path).once("value").then((snap) => snap.val());
+  return db.ref(path).once("value")
+    .then((snap) => snap.val())
+    .catch((err) => {
+      console.error("Firebase dbGet error on path", path, err);
+      return null;
+    });
 }
 function dbSet(path, value) {
   if (!db) return Promise.resolve();
-  return db.ref(path).set(value === undefined ? null : value);
+  return db.ref(path).set(value === undefined ? null : value).catch((err) => {
+    console.error("Firebase dbSet error on path", path, err);
+  });
 }
 // Écoute en direct : appelle cb(valeur) à chaque changement, renvoie une fonction de désabonnement.
 function dbListen(path, cb) {
   if (!db) return () => {};
   const ref = db.ref(path);
   const handler = (snap) => cb(snap.val());
-  ref.on("value", handler);
+  const errHandler = (err) => console.error("Firebase dbListen error on path", path, err);
+  ref.on("value", handler, errHandler);
   return () => ref.off("value", handler);
 }
 
