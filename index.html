@@ -36,10 +36,10 @@ const { useState, useEffect, useRef, useCallback } = React;
 // > "Vos applications" > config SDK).
 // =========================================================
 const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyBKC2TvEarEgVP9BRhAMwmho-NMQtzIR6I",
-  authDomain: "quizarena-bfea1.firebaseapp.com",
-  databaseURL: "https://quizarena-bfea1-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId: "quizarena-bfea1",
+  apiKey: "VOTRE_API_KEY",
+  authDomain: "VOTRE_PROJET.firebaseapp.com",
+  databaseURL: "https://VOTRE_PROJET-default-rtdb.firebaseio.com",
+  projectId: "VOTRE_PROJET",
 };
 
 let dbReady = false;
@@ -68,28 +68,21 @@ function dbListen(path, cb) {
   return () => ref.off("value", handler);
 }
 
-// ---------- Bibliothèque de quiz : stockage LOCAL (propre à chaque navigateur) ----------
-const LIBRARY_KEY = "quizarena_library";
-function loadLibrary() {
-  try {
-    return JSON.parse(localStorage.getItem(LIBRARY_KEY) || "[]");
-  } catch {
-    return [];
-  }
+// ---------- Bibliothèque de quiz : stockée dans Firebase (accessible depuis n'importe quel appareil) ----------
+async function loadLibrary() {
+  const lib = await dbGet("library");
+  if (!lib) return [];
+  // Firebase renvoie un objet { quizId: quiz }, on le transforme en tableau trié par date
+  return Object.values(lib).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
-function saveToLibrary(quiz) {
-  const lib = loadLibrary();
-  const idx = lib.findIndex((q) => q.id === quiz.id);
+async function saveToLibrary(quiz) {
   const entry = { ...quiz, updatedAt: Date.now() };
-  if (idx >= 0) lib[idx] = entry;
-  else lib.unshift(entry);
-  localStorage.setItem(LIBRARY_KEY, JSON.stringify(lib));
-  return lib;
+  await dbSet(`library/${quiz.id}`, entry);
+  return loadLibrary();
 }
-function deleteFromLibrary(id) {
-  const next = loadLibrary().filter((q) => q.id !== id);
-  localStorage.setItem(LIBRARY_KEY, JSON.stringify(next));
-  return next;
+async function deleteFromLibrary(id) {
+  await dbSet(`library/${id}`, null);
+  return loadLibrary();
 }
 
 // ---------- Icônes minimalistes (pas de dépendance npm) ----------
@@ -315,12 +308,12 @@ function HostFlow({ onExit }) {
   const [room, setRoom] = useState(null);
   const [answers, setAnswers] = useState({});
 
-  useEffect(() => { setLibrary(loadLibrary()); }, []);
+  useEffect(() => { loadLibrary().then(setLibrary); }, []);
 
   const openQuiz = (q) => { setQuiz(q); setStage("edit"); };
   const createNew = () => { setQuiz({ ...DEFAULT_QUIZ, id: genId(), title: "Nouveau quiz" }); setStage("edit"); };
-  const persistQuiz = (q) => setLibrary(saveToLibrary(q));
-  const removeFromLibrary = (id) => setLibrary(deleteFromLibrary(id));
+  const persistQuiz = async (q) => { const lib = await saveToLibrary(q); setLibrary(lib); };
+  const removeFromLibrary = async (id) => { const lib = await deleteFromLibrary(id); setLibrary(lib); };
 
   const roomPath = roomCode ? `rooms/${roomCode}` : null;
 
@@ -331,7 +324,7 @@ function HostFlow({ onExit }) {
   }, [roomPath]);
 
   const startRoom = async () => {
-    persistQuiz(quiz);
+    await persistQuiz(quiz);
     const code = genCode();
     const initial = { hostId, status: "lobby", quiz, currentQ: -1, questionStartTs: null, players: [] };
     setRoomCode(code);
